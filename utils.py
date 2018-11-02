@@ -1,10 +1,25 @@
-import glob
-import os
-import re
-import time
-import numpy as np
-import tensorflow as tf
-import lib.data as data
+import  glob
+import  os
+import  re
+import  time
+import  numpy as np
+import  tensorflow as tf
+
+
+
+class MyInit(tf.initializers.random_normal):
+
+    def __init__(self, slope):
+        self.slope = slope
+
+    def get_config(self):
+        return dict(slope=self.slope)
+
+    def __call__(self, shape, dtype=None, partition_info=None):
+        del partition_info
+        dtype = dtype or tf.float32
+        std = tf.rsqrt((1. + self.slope**2) * tf.cast(tf.reduce_prod(shape[:-1]), tf.float32))
+        return tf.random_normal(shape, stddev=std, dtype=dtype)
 
 
 class HookReport(tf.train.SessionRunHook):
@@ -195,7 +210,8 @@ def load_ae(path, target_dataset, batch, all_aes, return_dataset=False):
     :return:
     """
     r_param = re.compile('(?P<name>[a-zA-Z][a-z_]*)(?P<value>(True)|(False)|(\d+(\.\d+)?(,\d+)*))')
-    folders = [x for x in os.path.abspath(path).split('/') if x] # [..., 'logs', 'mnist32', 'AEBaseline_depth16_latent2_scales3']
+    folders = [x for x in os.path.abspath(path).split('/') if x]
+    # [..., 'logs', 'mnist32', 'AEBaseline_depth16_latent2_scales3']
     dataset = folders[-2]
     if dataset != target_dataset:
         tf.logging.log(tf.logging.WARN,

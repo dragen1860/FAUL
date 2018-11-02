@@ -1,15 +1,18 @@
 import  tensorflow as tf
-from    lib import train, utils, classifiers, data, layers
+from    mlp import single_layer_classifier
+from    model import FAUL
 import  math
 from    tensorflow import flags
 
 from    mnistFS import MnistFS
+from    utils import MyInit, HookReport
+
 
 FLAGS = tf.flags.FLAGS
 
 
 
-class MetaAE(train.FAUL):
+class MetaAE(FAUL):
 
 
 
@@ -29,7 +32,7 @@ class MetaAE(train.FAUL):
         vars = []
         # kernel size
         k = 3
-        myinit = layers.MyInit(0.2) # tf.contrib.layers.xavier_initializer()
+        myinit = MyInit(0.2) # tf.contrib.layers.xavier_initializer()
 
         # print(factor, type(factor))
         # assert factor is 3 will ERROR!!!
@@ -39,7 +42,7 @@ class MetaAE(train.FAUL):
             with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
                 # layer1
                 # [b, d, d, img_c] => [b, d, d, c]
-                vars.append(tf.get_variable('w1', [1, 1, self.colors, c], dtype=tf.float32, initializer=myinit))
+                vars.append(tf.get_variable('w1', [1, 1, self.imgc, c], dtype=tf.float32, initializer=myinit))
                 vars.append(tf.get_variable('b1', [c], dtype=tf.float32, initializer=tf.initializers.zeros()))
 
                 # layer 2 ~ 7
@@ -103,9 +106,9 @@ class MetaAE(train.FAUL):
                 layer_counter += 1
 
                 # layer8
-                vars.append(tf.get_variable('w'+str(layer_counter), [3, 3, c, self.colors], dtype=tf.float32,
+                vars.append(tf.get_variable('w'+str(layer_counter), [3, 3, c, self.imgc], dtype=tf.float32,
                                             initializer=myinit))
-                vars.append(tf.get_variable('b'+str(layer_counter), [self.colors], dtype=tf.float32,
+                vars.append(tf.get_variable('b'+str(layer_counter), [self.imgc], dtype=tf.float32,
                                             initializer=tf.initializers.zeros()))
 
                 self.decoder_layer_num = layer_counter
@@ -231,11 +234,8 @@ class MetaAE(train.FAUL):
 
         return op
 
-    def model(self, n_way, k_spt, k_qry, h_c, c, factor, training=True):
+    def model(self, h_c, c, factor, training=True):
         """
-        :param n_way:
-        :param k_spt:
-        :param k_qry:
         :param h_c: latent channel
         :param c: basic channel number
         :param factor: channel factor
@@ -249,7 +249,8 @@ class MetaAE(train.FAUL):
         meta_lr = FLAGS.meta_lr
 
         # get hidden features maps dim/height/width and channel number
-        h_d = self.height>>factor
+        h_d = self.imgsz >> factor
+        n_way, k_spt, k_qry = self.n_way, self.k_spt, self.k_qry
 
         print('tasks:', task_num, 'update_lr:', update_lr, 'update_num:', update_num, 'meta lr:', meta_lr)
         print('n_way:', n_way, 'k_spt:', k_spt, 'k_qry:', k_qry)
@@ -262,8 +263,7 @@ class MetaAE(train.FAUL):
             NOTICE: this function will use outer `vars`.
             """
             x_spt, x_qry = task_input
-            print(x_spt)
-            print(x_spt.shape, x_qry.shape)
+            print('x_spt:', x_spt.shape, 'x_qry:', x_qry.shape)
 
             preds_qry, losses_qry, accs_qry = [], [], []
 
@@ -304,9 +304,9 @@ class MetaAE(train.FAUL):
         ######################################################
         if training:
             # [b, 32, 32, 1]
-            train_spt_x = tf.placeholder(tf.float32, [task_num, n_way * k_spt, self.height, self.width, self.colors],
+            train_spt_x = tf.placeholder(tf.float32, [task_num, n_way * k_spt, self.imgsz, self.imgsz, self.imgc],
                                          name='train_spt_x')
-            train_qry_x = tf.placeholder(tf.float32, [task_num, n_way * k_qry, self.height, self.width, self.colors],
+            train_qry_x = tf.placeholder(tf.float32, [task_num, n_way * k_qry, self.imgsz, self.imgsz, self.imgc],
                                          name='train_qry_x')
             # [b, 10]
             # trian_spt_y and train_qry_y will NOT be used since its unsupervised training
@@ -334,7 +334,7 @@ class MetaAE(train.FAUL):
 
             for i in range(update_num):
                 # print(losses_qry[i])
-                utils.HookReport.log_tensor(self.losses_qry[i], 'train_loss_qry%d' % i)
+                HookReport.log_tensor(self.losses_qry[i], 'train_loss_qry%d' % i)
                 # utils.HookReport.log_tensor(tf.sqrt(self.losses_qry[i]) * 127.5, 'rmse%d'%i)
 
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
@@ -343,9 +343,9 @@ class MetaAE(train.FAUL):
 
         #=========================================================
         # [5, 32, 32, 1] [75, 32, 32, 1]
-        test_spt_x = tf.placeholder(tf.float32, [n_way * k_spt, self.height, self.width, self.colors],
+        test_spt_x = tf.placeholder(tf.float32, [n_way * k_spt, self.imgsz, self.imgsz, self.imgc],
                                     name='test_spt_x')
-        test_qry_x = tf.placeholder(tf.float32, [n_way * k_qry, self.height, self.width, self.colors],
+        test_qry_x = tf.placeholder(tf.float32, [n_way * k_qry, self.imgsz, self.imgsz, self.imgc],
                                     name='test_qry_x')
         # []
         test_spt_y = tf.placeholder(tf.float32, [n_way * k_spt], name='test_spt_y')
@@ -356,7 +356,7 @@ class MetaAE(train.FAUL):
 
 
         # we will use these ops to get test process
-        encoder_ops, decoder_ops, ae_ops, classify_ops = [], [], [], []
+        encoder_ops, decoder_ops, ae_ops, classify_preds = [], [], [], []
 
         def record_test_ops(vars_k, k):
             """
@@ -375,16 +375,17 @@ class MetaAE(train.FAUL):
 
             # this op only optimize classifier, hence stop_gradient after encoder_op
             # classify_op is not a single op, including prediction and loss
-            classify_op = classifiers.single_layer_classifier(tf.stop_gradient(encoder_op), test_qry_y, self.nclass,
-                                                              scope='classifier_%d'%k, reuse=False)
-            classify_ops.append(classify_op)
+            classify_loss, classify_pred = single_layer_classifier(tf.stop_gradient(encoder_op),
+                                                                test_qry_y, self.n_way,
+                                                                scope='classifier_%d'%k, reuse=False)
+            classify_preds.append(classify_pred)
             # record classification loss on latent
-            # utils.HookReport.log_tensor(tf.reduce_mean(classify_op.loss), 'test_classify_h_loss_update_%d'%k)
+            # utils.HookReport.log_tensor(tf.reduce_mean(classify_loss), 'test_classify_h_loss_update_%d'%k)
 
             return
 
 
-        # record before pretrain status
+        # record before pretrain, update_k = 0
         record_test_ops(vars, 0)
 
         # starting from parameters: vars!
@@ -392,7 +393,7 @@ class MetaAE(train.FAUL):
         loss = tf.losses.mean_squared_error(pred_x, test_spt_x)
         grads = tf.gradients(loss, vars)
         fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(vars, grads)))
-        # record update=1 status
+        # record update_k=1 status
         record_test_ops(fast_weights, 1)
 
         for i in range(1, update_num):
@@ -420,7 +421,7 @@ class MetaAE(train.FAUL):
             'train_qry_y': train_qry_y if training else None,
 
             'pretrain_op' : pretrain_op,
-            'classify_ops': classify_ops, # len=update_num+1, array of (op.output, op.loss)
+            'classify_preds': classify_preds, # len=update_num+1, array of (op.output, op.loss)
             'encoder_ops' : encoder_ops, # len=update_num+1,
             'decoder_ops' : decoder_ops, # len=update_num+1,
             'ae_ops'      : ae_ops, # len=update_num+1
@@ -451,13 +452,19 @@ def main(argv):
 
     train_db = MnistFS('ae_data/mnist', mode='train')
     test_db = MnistFS('ae_data/mnist', mode='test')
-    dataset = data.DataSet('mnist', train_db, test_db, None, 32, 32, 1, 5)
+    dbs = {
+        'train_db': train_db,
+        'test_db': test_db,
+        'imgsz': 32,
+        'imgc': 1,
+        'name': 'mnist',
+        'n_way': 5,
+        'k_spt': 1,
+        'k_qry': 15
+    }
 
-    factor = int(round(math.log(dataset.width // FLAGS.h_d, 2)))
-    model = MetaAE(dataset, FLAGS.train_dir,
-                    n_way = 5,
-                    k_spt = 1,
-                    k_qry = 15,
+    factor = int(round(math.log(32 // FLAGS.h_d, 2)))
+    model = MetaAE(dbs, FLAGS.train_dir,
                     h_c = FLAGS.h_c,
                     c = FLAGS.c,
                     factor = factor)
