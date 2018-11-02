@@ -34,9 +34,6 @@ class MetaAE(FAUL):
         k = 3
         myinit = MyInit(0.2) # tf.contrib.layers.xavier_initializer()
 
-        # print(factor, type(factor))
-        # assert factor is 3 will ERROR!!!
-        assert factor == 3
 
         if name == 'encoder':
             with tf.variable_scope(name, reuse=tf.AUTO_REUSE):
@@ -463,7 +460,7 @@ def main(argv):
         'k_qry': 15
     }
 
-    factor = int(round(math.log(32 // FLAGS.h_d, 2)))
+    factor = 1 # int(round(math.log(32 // FLAGS.h_d, 2)))
     model = MetaAE(dbs, FLAGS.train_dir,
                     h_c = FLAGS.h_c,
                     c = FLAGS.c,
