@@ -142,7 +142,7 @@ class FAUL:
             stop_hook = tf.train.StopAtStepHook(last_step=1 + (FLAGS.total_kimg << 10) // batchsz)
             report_hook = utils.HookReport(report_kimg << 7, batchsz)
 
-            init_my_summary_op = lambda op, value: self.tf_sess.run(op, feed_dict={some_float: value})
+            update_my_summary_op = lambda op, value: self.tf_sess.run(op, feed_dict={some_float: value})
 
 
 
@@ -185,7 +185,7 @@ class FAUL:
                         accuracy = self.eval_latent_accuracy(ops)
                         # print('eval accuracy:', accuracy, self.cur_nimg)
                         # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
-                        init_my_summary_op(latent_accuracy_op, accuracy)
+                        update_my_summary_op(latent_accuracy_op, accuracy)
 
 
     def eval_latent_accuracy(self, ops):
