@@ -20,7 +20,9 @@ def single_layer_classifier(h, label, n_way, scope, reuse=False):
         # => [b]
         pred = tf.argmax(logits, 1)
 
+        # TODO: when your label=[5,6,7,8,9]> n_way=5, it wont occur an error!
+        tf.assert_less(label, tf.to_float(n_way))
         label = tf.one_hot(tf.to_int32(label), n_way)
-        loss = tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits, labels=label)
+        loss = tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits, labels=label))
 
     return loss, pred

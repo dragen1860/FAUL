@@ -172,17 +172,14 @@ class FAUL:
                 })
 
 
-
                 # Time to evaluate classification accuracy
-                if self.cur_nimg % (report_kimg << 1) == 0:
+                if self.cur_nimg % (report_kimg << 2) == 0:
 
-                    print(self.cur_nimg, result[1:])
-
-                    # # return with float accuracy
-                    # accuracy = self.eval_latent_accuracy(ops)
-                    # # print('eval accuracy:', accuracy, self.cur_nimg)
-                    # # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
-                    # update_my_summary_op(latent_accuracy_op, accuracy)
+                    # return with float accuracy
+                    accuracy = self.eval_latent_accuracy()
+                    # print('eval accuracy:', accuracy, self.cur_nimg)
+                    # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
+                    update_my_summary_op(latent_accuracy_op, accuracy)
 
 
 
@@ -190,7 +187,7 @@ class FAUL:
                 self.cur_nimg = batchsz * self.tf_sess.run(global_step)
 
 
-    def eval_latent_accuracy(self, ops):
+    def eval_latent_accuracy(self):
         """
         Eval MLP classification accuracy based on latent representation
         :param ops:
@@ -200,45 +197,37 @@ class FAUL:
 
         batchsz = FLAGS.batchsz
         update_num = FLAGS.update_num
-        accs = np.zeros(update_num+1)
+        accs = np.zeros(update_num+1).astype(np.float)
         total_counter = 0
         total_iter = 0
 
         while True:
             spt_x, spt_y, qry_x, qry_y = self.test_db.get_batch(batchsz=1, use_episode=True)
-            train_spt_x, train_spt_y, train_qry_x, train_qry_y = self.train_db.get_batch(batchsz, use_episode=True)
 
-            result = self.tf_sess.run(ops['pretrain_op'],
-                                                    feed_dict={
-                                                        ops['test_spt_x']: spt_x[0],
-                                                        ops['test_spt_y']: spt_y[0],
-                                                        ops['test_qry_x']: qry_x[0],
-                                                        ops['test_qry_y']: qry_y[0]
-                                                        #
-                                                        # ops['train_spt_x']: train_spt_x,
-                                                        # ops['train_spt_y']: train_spt_y,
-                                                        # ops['train_qry_x']: train_qry_x,
-                                                        # ops['train_qry_y']: train_qry_y
+            result = self.tf_sess.run(self.pretrain_op, feed_dict={
+                                                        self.test_spt_x: spt_x[0],
+                                                        self.test_spt_y: spt_y[0],
+                                                        self.test_qry_x: qry_x[0],
+                                                        self.test_qry_y: qry_y[0]
                                                     })
-            # for i in range(update_num+1):
-            #     accs[i] += result[i+1]
 
             for step in range(update_num):
-                classify_ops = ops['classify_ops'][step]
+                classify_ops = self.classify_ops[step]
 
                 for i in range(10):
                     # train update_num+1 classifers for one step
                     # classify_ops = [classify_train_op, classify_loss, classify_pred, classify_acc]
                     _, classify_loss, classify_pred, classify_acc = self.tf_sess.run(classify_ops,
-                                                        feed_dict={
-                                                            ops['test_spt_x']: spt_x[0],
-                                                            ops['test_spt_y']: spt_y[0],
-                                                            ops['test_qry_x']: qry_x[0],
-                                                            ops['test_qry_y']: qry_y[0]
-                                                        })
+                                                                                     feed_dict={
+                                                                                         self.test_spt_x: spt_x[0],
+                                                                                         self.test_spt_y: spt_y[0],
+                                                                                         self.test_qry_x: qry_x[0],
+                                                                                         self.test_qry_y: qry_y[0]
+                                                                                     })
 
                 # after 100 training steps, we sum step=0~5 accuracy
                 accs[step] += classify_acc
+                print(classify_pred, spt_y[0], classify_loss)
 
 
             total_counter += batchsz

@@ -328,9 +328,9 @@ class MetaAE(FAUL):
         :return:
         """
         # add 0 updated representation
-        encoder_op = self.forward_encoder(self.test_qry_x, vars_k[:self.encoder_var_num])
+        encoder_op = self.forward_encoder(self.test_spt_x, vars_k[:self.encoder_var_num])
         decoder_op = self.forward_decoder(self.h, vars_k[self.encoder_var_num:])  # reuse
-        ae_op = self.forward_ae(self.test_qry_x, vars_k)
+        ae_op = self.forward_ae(self.test_spt_x, vars_k)
         self.encoder_ops.append(encoder_op)
         self.decoder_ops.append(decoder_op)
         self.ae_ops.append(ae_op)
@@ -339,11 +339,11 @@ class MetaAE(FAUL):
         # classify_op is not a single op, including prediction and loss
 
         classify_loss, classify_pred = single_layer_classifier(tf.stop_gradient(encoder_op),
-                                                            self.test_qry_y, self.n_way,
+                                                            self.test_spt_y-5, self.n_way,
                                                             scope='classifier_%d'%k, reuse=False)
         classify_train_op = tf.train.AdamOptimizer().minimize(classify_loss)
         # print(test_qry_y, classify_pred)
-        _, classify_acc = tf.metrics.accuracy(self.test_qry_y, classify_pred)
+        _, classify_acc = tf.metrics.accuracy(self.test_spt_y-5, classify_pred)
 
         self.classify_ops.append([classify_train_op, classify_loss, classify_pred, classify_acc])
 
@@ -379,22 +379,26 @@ class MetaAE(FAUL):
         gvs = [(tf.clip_by_norm(grad, 10), var) for grad, var in gvs]
         meta_op = optimizer.apply_gradients(gvs, global_step=tf.train.get_global_step())
 
-        for i in range(update_num):
-            # print(losses_qry[i])
-            HookReport.log_tensor(self.losses_qry[i], 'train_loss_qry%d' % i)
-            # utils.HookReport.log_tensor(tf.sqrt(self.losses_qry[i]) * 127.5, 'rmse%d'%i)
 
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         with tf.control_dependencies(update_ops):
             self.meta_op = tf.group([meta_op])
 
+        for i in range(update_num):
+            # print(losses_qry[i])
+            HookReport.log_tensor(self.losses_qry[i], 'train_loss_qry%d' % i)
+            # utils.HookReport.log_tensor(tf.sqrt(self.losses_qry[i]) * 127.5, 'rmse%d'%i)
 
+
+        #=================================================================================
+        self.test_losses_spt = []
         # record before pretrain, update_k = 0
         self.record_test_ops(self.vars, 0)
 
         # starting from parameters: vars!
         pred_x = self.forward_ae(self.test_spt_x, self.vars)
         loss = tf.losses.mean_squared_error(pred_x, self.test_spt_x)
+        self.test_losses_spt.append(loss)
         grads = tf.gradients(loss, self.vars)
         fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(self.vars, grads)))
         # record update_k=1 status
@@ -403,6 +407,7 @@ class MetaAE(FAUL):
         for i in range(1, update_num):
             pred_x = self.forward_ae(self.test_spt_x, fast_weights)
             loss = tf.losses.mean_squared_error(pred_x, self.test_spt_x)
+            self.test_losses_spt.append(loss)
             grads = tf.gradients(loss, fast_weights)
             fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(fast_weights, grads)))
             # record update=i+1 status
@@ -410,8 +415,6 @@ class MetaAE(FAUL):
 
         # treat the last update step as pretrain_op
         self.pretrain_op = fast_weights
-        ######################################################
-
 
 
         # def gen_images():

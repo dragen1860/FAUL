@@ -108,13 +108,15 @@ class MnistFS:
             lambda x: Image.fromarray(np.uint8(x*255)),
             # resize
             transforms.Resize((32, 32)),
+            # lambda x: x/255.,
+            # transforms.Normalize(0.5, 0.5),
             # flatten
             lambda x: np.array(x).reshape(-1)
         ])
         spt_x = list(map(lambda x:transform(x), spt_x))
-        spt_x = np.array(spt_x)
+        spt_x = np.array(spt_x) /255.
         qry_x = list(map(lambda x:transform(x), qry_x))
-        qry_x = np.array(qry_x)
+        qry_x = np.array(qry_x) /255.
 
 
         return spt_x, spt_y, qry_x, qry_y
