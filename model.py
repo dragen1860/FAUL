@@ -74,8 +74,8 @@ class FAUL:
         which is a tf.train.MonitoredTrainingSession
         :return:
         """
-        # return self.sess._tf_sess()
-        return self.sess
+        return self.sess._tf_sess()
+        # return self.sess
 
     @staticmethod
     def add_summary_var(name):
@@ -96,20 +96,17 @@ class FAUL:
         and restore model from ckpt
         :return:
         """
-        if self.eval_graph is None:
-            self.eval_graph = tf.Graph()
 
-        with self.eval_graph.as_default():
-            global_step = tf.train.get_or_create_global_step()
-            # this model function will be implemented by child class!
-            self.eval_ops = self.model(**self.params)
-            self.eval_sess = tf.Session()
-            saver = tf.train.Saver()
+        global_step = tf.train.get_or_create_global_step()
+        # this model function will be implemented by child class!
+        self.eval_ops = self.model(**self.params)
+        self.eval_sess = tf.Session()
+        saver = tf.train.Saver()
 
-            ckpt = utils.find_latest_checkpoint(self.checkpoint_dir)
-            saver.restore(self.eval_sess, ckpt)
-            tf.logging.info('Restore  %s from ckpt, eval mode at global_step %d',
-                                self.__class__.__name__, self.eval_sess.run(global_step))
+        ckpt = utils.find_latest_checkpoint(self.checkpoint_dir)
+        saver.restore(self.eval_sess, ckpt)
+        tf.logging.info('Restore  %s from ckpt, eval mode at global_step %d',
+                            self.__class__.__name__, self.eval_sess.run(global_step))
 
 
     def train(self):
@@ -123,80 +120,74 @@ class FAUL:
         report_kimg = 1 << 5
 
 
-        if self.train_graph is None:
-            self.train_graph = tf.Graph()
+        # data_in = self.train_data.make_one_shot_iterator().get_next()
+        global_step = tf.train.get_or_create_global_step()
 
-        with self.train_graph.as_default():
+        some_float = tf.placeholder(tf.float32, [], 'some_float')
+        self.latent_accuracy = self.add_summary_var('latent_accuracy')
+        update_summary_var = lambda x: tf.assign(x, some_float)
+        latent_accuracy_op = update_summary_var(self.latent_accuracy)
 
-            # data_in = self.train_data.make_one_shot_iterator().get_next()
-            global_step = tf.train.get_or_create_global_step()
+        summary_hook = tf.train.SummarySaverHook(
+                            save_steps=(report_kimg << 5) // batchsz, # save every steps
+                            output_dir=self.summary_dir,
+                            summary_op=tf.summary.merge_all())
+        stop_hook = tf.train.StopAtStepHook(last_step=1 + (FLAGS.total_kimg << 10) // batchsz)
+        report_hook = utils.HookReport(report_kimg << 2, batchsz)
 
-
-            some_float = tf.placeholder(tf.float32, [], 'some_float')
-            self.latent_accuracy = self.add_summary_var('latent_accuracy')
-            update_summary_var = lambda x: tf.assign(x, some_float)
-            latent_accuracy_op = update_summary_var(self.latent_accuracy)
-
-            summary_hook = tf.train.SummarySaverHook(
-                                save_steps=(report_kimg << 9) // batchsz, # save every steps
-                                output_dir=self.summary_dir,
-                                summary_op=tf.summary.merge_all())
-            stop_hook = tf.train.StopAtStepHook(last_step=1 + (FLAGS.total_kimg << 10) // batchsz)
-            report_hook = utils.HookReport(report_kimg << 7, batchsz)
-
-            update_my_summary_op = lambda op, value: self.tf_sess.run(op, feed_dict={some_float: value})
+        update_my_summary_op = lambda op, value: self.tf_sess.run(op, feed_dict={some_float: value})
 
 
 
-            # main op
-            ops = self.model(**self.params)
+        # main op
+        self.model(**self.params)
 
-            config = tf.ConfigProto()
-            config.gpu_options.allow_growth = True
-            # with tf.train.MonitoredTrainingSession(
-            #         checkpoint_dir=self.checkpoint_dir, # automatically restore from ckpt
-            #         hooks=[stop_hook],
-            #         chief_only_hooks=[report_hook, summary_hook], # the hooks are only valid for chief session
-            #         save_checkpoint_secs=5000, # every 6 minutes save ckpt
-            #         save_summaries_steps=0, # do NOT save summary into checkpoint_dir
-            #         config=config) as sess:
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        with tf.train.MonitoredTrainingSession(
+                checkpoint_dir=self.checkpoint_dir, # automatically restore from ckpt
+                hooks=[stop_hook],
+                chief_only_hooks=[report_hook, summary_hook], # the hooks are only valid for chief session
+                save_checkpoint_secs=0, # every 6 minutes save ckpt
+                save_summaries_steps=0, # do NOT save summary into checkpoint_dir
+                config=config) as sess:
 
-            with tf.Session(config=config) as sess:
-                sess.run(tf.local_variables_initializer())
-                sess.run(tf.global_variables_initializer())
+        # with tf.Session(config=config) as sess:
+        #     sess.run(tf.local_variables_initializer())
+        #     sess.run(tf.global_variables_initializer())
 
-                self.sess = sess
+            self.sess = sess
+            self.cur_nimg = batchsz * self.tf_sess.run(global_step)
+
+            while True:
+                # run data_in ops first and then run ops.train_op
+
+                spt_x, spt_y, qry_x, qry_y = self.train_db.get_batch(batchsz, use_episode=True)
+
+                result = sess.run([self.meta_op] + self.losses_qry, feed_dict={
+                    self.train_spt_x: spt_x,
+                    self.train_spt_y: spt_y,
+                    self.train_qry_x: qry_x,
+                    self.train_qry_y: qry_y
+                })
+
+
+
+                # Time to evaluate classification accuracy
+                if self.cur_nimg % (report_kimg << 1) == 0:
+
+                    print(self.cur_nimg, result[1:])
+
+                    # # return with float accuracy
+                    # accuracy = self.eval_latent_accuracy(ops)
+                    # # print('eval accuracy:', accuracy, self.cur_nimg)
+                    # # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
+                    # update_my_summary_op(latent_accuracy_op, accuracy)
+
+
+
+                # update processed image counter
                 self.cur_nimg = batchsz * self.tf_sess.run(global_step)
-
-                while True:
-                    # run data_in ops first and then run ops.train_op
-
-                    spt_x, spt_y, qry_x, qry_y = self.train_db.get_batch(batchsz, use_episode=True)
-
-                    result = sess.run([ops['meta_op']] + ops['losses_qry'], feed_dict={
-                        ops['train_spt_x']: spt_x,
-                        ops['train_spt_y']: spt_y,
-                        ops['train_qry_x']: qry_x,
-                        ops['train_qry_y']: qry_y
-                    })
-
-
-
-                    # Time to evaluate classification accuracy
-                    if self.cur_nimg % (report_kimg << 2) == 0:
-
-                        print(self.cur_nimg, result[1:])
-
-                        # # return with float accuracy
-                        # accuracy = self.eval_latent_accuracy(ops)
-                        # # print('eval accuracy:', accuracy, self.cur_nimg)
-                        # # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
-                        # update_my_summary_op(latent_accuracy_op, accuracy)
-
-
-
-                    # update processed image counter
-                    self.cur_nimg = batchsz * self.tf_sess.run(global_step)
 
 
     def eval_latent_accuracy(self, ops):

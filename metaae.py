@@ -32,7 +32,7 @@ class MetaAE(FAUL):
         vars = []
         # kernel size
         k = 3
-        myinit = MyInit(0.2) # tf.contrib.layers.xavier_initializer()
+        myinit = tf.contrib.layers.xavier_initializer()
 
 
         if name == 'encoder':
@@ -231,6 +231,127 @@ class MetaAE(FAUL):
 
         return op
 
+    def __init__(self, dbs, train_dir, **kwargs):
+        super(MetaAE, self).__init__(dbs, train_dir, **kwargs)
+
+
+        self.task_num = FLAGS.batchsz
+        self.update_num = FLAGS.update_num
+        self.update_lr = FLAGS.update_lr
+        self.meta_lr = FLAGS.meta_lr
+
+
+        # merge 2 variables list into a list
+        # this is 1st time to get these variables, so it will create and return
+        self.c, self.factor, self.h_c = kwargs['c'], kwargs['factor'], kwargs['h_c']
+        self.h_d = self.imgsz >> self.factor
+        self.vars = self.get_weights(self.c, self.factor, self.h_c, 'encoder') + \
+                    self.get_weights(self.c, self.factor, self.h_c, 'decoder')
+
+        print('tasks:', self.task_num, 'update_lr:', self.update_lr, 'update_num:',
+              self.update_num, 'meta lr:', self.meta_lr)
+        print('n_way:', self.n_way, 'k_spt:', self.k_spt, 'k_qry:', self.k_qry)
+        print('h:', [self.h_d, self.h_d, self.h_c], 'conv ch:', self.c, 'factor:', self.factor)
+
+        # we will use these ops to get test process
+        self.encoder_ops, self.decoder_ops, self.ae_ops, self.classify_ops = [], [], [], []
+
+        # [b, 32, 32, 1]
+        self.train_spt_x = tf.placeholder(tf.float32,
+                                     [self.task_num, self.n_way * self.k_spt, self.imgsz, self.imgsz, self.imgc],
+                                     name='train_spt_x')
+        self.train_qry_x = tf.placeholder(tf.float32,
+                                     [self.task_num, self.n_way * self.k_qry, self.imgsz, self.imgsz, self.imgc],
+                                     name='train_qry_x')
+
+        # [b, 10]
+        # trian_spt_y and train_qry_y will NOT be used since its unsupervised training
+        # but we will use test_spt_y and test_qry_y to get performance benchmark.
+        self.train_spt_y = tf.placeholder(tf.float32, [self.task_num, self.n_way * self.k_spt], name='train_spt_y')
+        self.train_qry_y = tf.placeholder(tf.float32, [self.task_num, self.n_way * self.k_qry], name='train_qry_y')
+
+        # [5, 32, 32, 1] [75, 32, 32, 1]
+        self.test_spt_x = tf.placeholder(tf.float32, [self.n_way * self.k_spt, self.imgsz, self.imgsz, self.imgc],
+                                    name='test_spt_x')
+        self.test_qry_x = tf.placeholder(tf.float32, [self.n_way * self.k_qry, self.imgsz, self.imgsz, self.imgc],
+                                    name='test_qry_x')
+        # []
+        self.test_spt_y = tf.placeholder(tf.float32, [self.n_way * self.k_spt], name='test_spt_y')
+        self.test_qry_y = tf.placeholder(tf.float32, [self.n_way * self.k_qry], name='test_qry_y')
+
+        # [b, 4, 4, 16]
+        self.h = tf.placeholder(tf.float32, [None, self.h_d, self.h_d, self.h_c], name='h')
+
+    def task_metalearn(self, task_input):
+        """
+        create single task op, we need call this func multiple times to create a bunches of ops
+        for several tasks
+        NOTICE: this function will use outer `vars`.
+        """
+        x_spt, x_qry = task_input
+        print('x_spt:', x_spt.shape, 'x_qry:', x_qry.shape)
+
+        preds_qry, losses_qry, accs_qry = [], [], []
+
+        pred_spt = self.forward_ae(x_spt, self.vars)
+        loss_spt = tf.losses.mean_squared_error(labels=x_spt, predictions=pred_spt)
+
+        grads = tf.gradients(loss_spt, self.vars)
+        # if FLAGS.stop_grad:
+        #     grads = [tf.stop_gradient(grad) for grad in grads]
+        fast_weights = list(map(lambda x:x[0] - self.update_lr * x[1], zip(self.vars, grads)))
+        pred_qry = self.forward_ae(x_qry, fast_weights)
+        preds_qry.append(pred_qry)
+        loss_qry = tf.losses.mean_squared_error(labels=x_qry, predictions=pred_qry)
+        losses_qry.append(loss_qry)
+
+        for _ in range(self.update_num - 1):
+            pred_spt = self.forward_ae(x_spt, fast_weights)
+            loss_spt = tf.losses.mean_squared_error(labels=x_spt, predictions=pred_spt)
+            grads = tf.gradients(loss_spt, fast_weights)
+            # if FLAGS.stop_grad:
+            #     grads = [tf.stop_gradient(grad) for grad in grads]
+            fast_weights = list(map(lambda x: x[0] - self.update_lr * x[1], zip(fast_weights, grads)))
+            pred_qry = self.forward_ae(x_qry, fast_weights)
+            preds_qry.append(pred_qry)
+            loss_qry = tf.losses.mean_squared_error(labels=x_qry, predictions=pred_qry)
+            losses_qry.append(loss_qry)
+
+
+        return [pred_spt, preds_qry, loss_spt, losses_qry]
+
+    def record_test_ops(self, vars_k, k):
+        """
+        record intermediate test status for update_num pretrain
+        :param vars_k:
+        :param k: just for log_tensor
+        :return:
+        """
+        # add 0 updated representation
+        encoder_op = self.forward_encoder(self.test_qry_x, vars_k[:self.encoder_var_num])
+        decoder_op = self.forward_decoder(self.h, vars_k[self.encoder_var_num:])  # reuse
+        ae_op = self.forward_ae(self.test_qry_x, vars_k)
+        self.encoder_ops.append(encoder_op)
+        self.decoder_ops.append(decoder_op)
+        self.ae_ops.append(ae_op)
+
+        # this op only optimize classifier, hence stop_gradient after encoder_op
+        # classify_op is not a single op, including prediction and loss
+
+        classify_loss, classify_pred = single_layer_classifier(tf.stop_gradient(encoder_op),
+                                                            self.test_qry_y, self.n_way,
+                                                            scope='classifier_%d'%k, reuse=False)
+        classify_train_op = tf.train.AdamOptimizer().minimize(classify_loss)
+        # print(test_qry_y, classify_pred)
+        _, classify_acc = tf.metrics.accuracy(self.test_qry_y, classify_pred)
+
+        self.classify_ops.append([classify_train_op, classify_loss, classify_pred, classify_acc])
+
+        # record classification loss on latent
+        # utils.HookReport.log_tensor(tf.reduce_mean(classify_loss), 'test_classify_h_loss_update_%d'%k)
+
+        return
+
     def model(self, h_c, c, factor, training=True):
         """
         :param h_c: latent channel
@@ -239,202 +360,58 @@ class MetaAE(FAUL):
         :param training: train or test
         :return:
         """
-        # meta batch size
-        task_num = FLAGS.batchsz
-        update_num = FLAGS.update_num
-        update_lr = FLAGS.update_lr
-        meta_lr = FLAGS.meta_lr
-
-        # get hidden features maps dim/height/width and channel number
-        h_d = self.imgsz >> factor
+        task_num, meta_lr, update_lr, update_num = self.task_num, self.meta_lr, self.update_lr, self.update_num
         n_way, k_spt, k_qry = self.n_way, self.k_spt, self.k_qry
 
-        print('tasks:', task_num, 'update_lr:', update_lr, 'update_num:', update_num, 'meta lr:', meta_lr)
-        print('n_way:', n_way, 'k_spt:', k_spt, 'k_qry:', k_qry)
-        print('h:', [h_d, h_d, h_c], 'conv ch:', c, 'factor:', factor)
 
-        def task_metalearn(task_input):
-            """
-            create single task op, we need call this func multiple times to create a bunches of ops
-            for several tasks
-            NOTICE: this function will use outer `vars`.
-            """
-            x_spt, x_qry = task_input
-            print('x_spt:', x_spt.shape, 'x_qry:', x_qry.shape)
+        out_dtype = [tf.float32, [tf.float32] * update_num, tf.float32, [tf.float32] * update_num]
+        # out_dtype.extend([tf.float32, [tf.float32]*update_num])
+        self.pred_spt, self.preds_qry, self.loss_spt, self.losses_qry = tf.map_fn(self.task_metalearn,
+                                                                        elems=[self.train_spt_x, self.train_qry_x],
+                                                                        dtype=out_dtype, parallel_iterations=task_num)
 
-            preds_qry, losses_qry, accs_qry = [], [], []
-
-            pred_spt = self.forward_ae(x_spt, vars)
-            loss_spt = tf.losses.mean_squared_error(labels=x_spt, predictions=pred_spt)
-
-            grads = tf.gradients(loss_spt, vars)
-            # if FLAGS.stop_grad:
-            #     grads = [tf.stop_gradient(grad) for grad in grads]
-            fast_weights = list(map(lambda x:x[0] - update_lr * x[1], zip(vars, grads)))
-            pred_qry = self.forward_ae(x_qry, fast_weights)
-            preds_qry.append(pred_qry)
-            loss_qry = tf.losses.mean_squared_error(labels=x_qry, predictions=pred_qry)
-            losses_qry.append(loss_qry)
-
-            for _ in range(update_num - 1):
-                pred_spt = self.forward_ae(x_spt, fast_weights)
-                loss_spt = tf.losses.mean_squared_error(labels=x_spt, predictions=pred_spt)
-                grads = tf.gradients(loss_spt, fast_weights)
-                # if FLAGS.stop_grad:
-                #     grads = [tf.stop_gradient(grad) for grad in grads]
-                fast_weights = list(map(lambda x: x[0] - update_lr * x[1], zip(fast_weights, grads)))
-                pred_qry = self.forward_ae(x_qry, fast_weights)
-                preds_qry.append(pred_qry)
-                loss_qry = tf.losses.mean_squared_error(labels=x_qry, predictions=pred_qry)
-                losses_qry.append(loss_qry)
+        self.loss_spt = tf.reduce_sum(self.loss_spt) / tf.to_float(task_num)
+        self.losses_qry = [tf.reduce_sum(self.losses_qry[j]) / tf.to_float(task_num) for j in range(update_num)]
 
 
-            task_output = [pred_spt, preds_qry, loss_spt, losses_qry]
-            return task_output
+        optimizer = tf.train.AdamOptimizer(meta_lr)
+        gvs = optimizer.compute_gradients(self.losses_qry[update_num - 1])
+        gvs = [(tf.clip_by_norm(grad, 10), var) for grad, var in gvs]
+        meta_op = optimizer.apply_gradients(gvs, global_step=tf.train.get_global_step())
 
-
-
-        # merge 2 variables list into a list
-        # this is 1st time to get these variables, so it will create and return
-        vars = self.get_weights(c, factor, h_c, 'encoder') + self.get_weights(c, factor, h_c, 'decoder')
-
-        ######################################################
-        if training:
-            # [b, 32, 32, 1]
-            train_spt_x = tf.placeholder(tf.float32, [task_num, n_way * k_spt, self.imgsz, self.imgsz, self.imgc],
-                                         name='train_spt_x')
-            train_qry_x = tf.placeholder(tf.float32, [task_num, n_way * k_qry, self.imgsz, self.imgsz, self.imgc],
-                                         name='train_qry_x')
-            # [b, 10]
-            # trian_spt_y and train_qry_y will NOT be used since its unsupervised training
-            # but we will use test_spt_y and test_qry_y to get performance benchmark.
-            train_spt_y = tf.placeholder(tf.float32, [task_num, n_way * k_spt], name='train_spt_y')
-            train_qry_y = tf.placeholder(tf.float32, [task_num, n_way * k_qry], name='train_qry_y')
-
-            out_dtype = [tf.float32, [tf.float32] * update_num, tf.float32, [tf.float32] * update_num]
-            # out_dtype.extend([tf.float32, [tf.float32]*update_num])
-            pred_spt, preds_qry, loss_spt, losses_qry = \
-                tf.map_fn(task_metalearn, elems=[train_spt_x, train_qry_x], dtype=out_dtype, parallel_iterations=task_num)
-
-            self.loss_spt = tf.reduce_sum(loss_spt) / tf.to_float(task_num)
-            self.losses_qry = [tf.reduce_sum(losses_qry[j]) / tf.to_float(task_num) for j in range(update_num)]
-            self.pred_spt, self.preds_qry = pred_spt, preds_qry
-            del pred_spt, preds_qry, loss_spt, losses_qry
-            # self.total_accuracy1 = tf.reduce_sum(accuraciesa) / tf.to_float(FLAGS.meta_batch_size)
-            # self.total_accuracies2 = [tf.reduce_sum(accuraciesb[j]) / tf.to_float(FLAGS.meta_batch_size) for j in range(num_updates)]
-            # self.pretrain_op = tf.train.AdamOptimizer(self.meta_lr).minimize(loss_spt)
-
-            optimizer = tf.train.AdamOptimizer(meta_lr)
-            gvs = optimizer.compute_gradients(self.losses_qry[update_num - 1])
-            # gvs = [(tf.clip_by_value(grad, -10, 10), var) for grad, var in gvs]
-            meta_op = optimizer.apply_gradients(gvs, global_step=tf.train.get_global_step())
-
-            for i in range(update_num):
-                # print(losses_qry[i])
-                HookReport.log_tensor(self.losses_qry[i], 'train_loss_qry%d' % i)
-                # utils.HookReport.log_tensor(tf.sqrt(self.losses_qry[i]) * 127.5, 'rmse%d'%i)
-
-            update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-            with tf.control_dependencies(update_ops):
-                meta_op = tf.group([meta_op])
-
-        #=========================================================
-        # [5, 32, 32, 1] [75, 32, 32, 1]
-        test_spt_x = tf.placeholder(tf.float32, [n_way * k_spt, self.imgsz, self.imgsz, self.imgc],
-                                    name='test_spt_x')
-        test_qry_x = tf.placeholder(tf.float32, [n_way * k_qry, self.imgsz, self.imgsz, self.imgc],
-                                    name='test_qry_x')
-        # []
-        test_spt_y = tf.placeholder(tf.float32, [n_way * k_spt], name='test_spt_y')
-        test_qry_y = tf.placeholder(tf.float32, [n_way * k_qry], name='test_qry_y')
-
-        # [b, 4, 4, 16]
-        h = tf.placeholder(tf.float32, [None, h_d, h_d, h_c], name='h')
-
-
-        # we will use these ops to get test process
-        encoder_ops, decoder_ops, ae_ops, classify_ops = [], [], [], []
-
-        def record_test_ops(vars_k, k):
-            """
-            record intermediate test status for update_num pretrain
-            :param vars_k:
-            :param k: just for log_tensor
-            :return:
-            """
-            # add 0 updated representation
-            encoder_op = self.forward_encoder(test_qry_x, vars_k[:self.encoder_var_num])
-            decoder_op = self.forward_decoder(h, vars_k[self.encoder_var_num:])  # reuse
-            ae_op = self.forward_ae(test_qry_x, vars_k)
-            encoder_ops.append(encoder_op)
-            decoder_ops.append(decoder_op)
-            ae_ops.append(ae_op)
-
-            # this op only optimize classifier, hence stop_gradient after encoder_op
-            # classify_op is not a single op, including prediction and loss
-
-            classify_loss, classify_pred = single_layer_classifier(tf.stop_gradient(encoder_op),
-                                                                test_qry_y, self.n_way,
-                                                                scope='classifier_%d'%k, reuse=False)
-            classify_train_op = tf.train.AdamOptimizer().minimize(classify_loss)
-            # print(test_qry_y, classify_pred)
-            _, classify_acc = tf.metrics.accuracy(test_qry_y, classify_pred)
-
-            classify_ops.append([classify_train_op, classify_loss, classify_pred, classify_acc])
-
-            # record classification loss on latent
-            # utils.HookReport.log_tensor(tf.reduce_mean(classify_loss), 'test_classify_h_loss_update_%d'%k)
-
-            return
-
-
-        # record before pretrain, update_k = 0
-        record_test_ops(vars, 0)
-
-        # starting from parameters: vars!
-        pred_x = self.forward_ae(test_spt_x, vars)
-        loss = tf.losses.mean_squared_error(pred_x, test_spt_x)
-        grads = tf.gradients(loss, vars)
-        fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(vars, grads)))
-        # record update_k=1 status
-        record_test_ops(fast_weights, 1)
-
-        for i in range(1, update_num):
-            pred_x = self.forward_ae(test_spt_x, fast_weights)
-            loss = tf.losses.mean_squared_error(pred_x, test_spt_x)
-            grads = tf.gradients(loss, fast_weights)
-            fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(fast_weights, grads)))
-            # record update=i+1 status
-            record_test_ops(fast_weights, i+1)
-
-        # treat the last update step as pretrain_op
-        pretrain_op = fast_weights
-        ######################################################
-
+        for i in range(update_num):
+            # print(losses_qry[i])
+            HookReport.log_tensor(self.losses_qry[i], 'train_loss_qry%d' % i)
+            # utils.HookReport.log_tensor(tf.sqrt(self.losses_qry[i]) * 127.5, 'rmse%d'%i)
 
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         with tf.control_dependencies(update_ops):
-            pretrain_op = tf.group([pretrain_op])
+            self.meta_op = tf.group([meta_op])
 
-        ops = {
-            'meta_op': meta_op if training else None,
-            'losses_qry' : self.losses_qry if training else None,
-            'train_spt_x': train_spt_x if training else None,
-            'train_spt_y': train_spt_y if training else None,
-            'train_qry_x': train_qry_x if training else None,
-            'train_qry_y': train_qry_y if training else None,
 
-            'pretrain_op' : pretrain_op,
-            'classify_ops': classify_ops,
-            'encoder_ops' : encoder_ops, # len=update_num+1,
-            'decoder_ops' : decoder_ops, # len=update_num+1,
-            'ae_ops'      : ae_ops, # len=update_num+1
+        # record before pretrain, update_k = 0
+        self.record_test_ops(self.vars, 0)
 
-            'test_spt_x': test_spt_x,
-            'test_spt_y': test_spt_y,
-            'test_qry_x': test_qry_x,
-            'test_qry_y': test_qry_y
-        }
+        # starting from parameters: vars!
+        pred_x = self.forward_ae(self.test_spt_x, self.vars)
+        loss = tf.losses.mean_squared_error(pred_x, self.test_spt_x)
+        grads = tf.gradients(loss, self.vars)
+        fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(self.vars, grads)))
+        # record update_k=1 status
+        self.record_test_ops(fast_weights, 1)
+
+        for i in range(1, update_num):
+            pred_x = self.forward_ae(self.test_spt_x, fast_weights)
+            loss = tf.losses.mean_squared_error(pred_x, self.test_spt_x)
+            grads = tf.gradients(loss, fast_weights)
+            fast_weights = list(map(lambda p:p[0] - update_lr * p[1], zip(fast_weights, grads)))
+            # record update=i+1 status
+            self.record_test_ops(fast_weights, i+1)
+
+        # treat the last update step as pretrain_op
+        self.pretrain_op = fast_weights
+        ######################################################
+
 
 
         # def gen_images():
@@ -446,7 +423,6 @@ class MetaAE(FAUL):
         # tf.summary.image('slerp', tf.expand_dims(slerp, 0))
         # tf.summary.image('samples', tf.expand_dims(samples, 0))
 
-        return ops
 
 
 
