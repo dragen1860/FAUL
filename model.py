@@ -74,7 +74,8 @@ class FAUL:
         which is a tf.train.MonitoredTrainingSession
         :return:
         """
-        return self.sess._tf_sess()
+        # return self.sess._tf_sess()
+        return self.sess
 
     @staticmethod
     def add_summary_var(name):
@@ -118,7 +119,8 @@ class FAUL:
         :return:
         """
         batchsz = FLAGS.batchsz
-        report_kimg = 1 << 6
+        update_num = FLAGS.update_num
+        report_kimg = 1 << 5
 
 
         if self.train_graph is None:
@@ -151,41 +153,50 @@ class FAUL:
 
             config = tf.ConfigProto()
             config.gpu_options.allow_growth = True
-            with tf.train.MonitoredTrainingSession(
-                    checkpoint_dir=self.checkpoint_dir, # automatically restore from ckpt
-                    hooks=[stop_hook],
-                    chief_only_hooks=[report_hook, summary_hook], # the hooks are only valid for chief session
-                    save_checkpoint_secs=5000, # every 6 minutes save ckpt
-                    save_summaries_steps=0, # do NOT save summary into checkpoint_dir
-                    config=config) as sess:
+            # with tf.train.MonitoredTrainingSession(
+            #         checkpoint_dir=self.checkpoint_dir, # automatically restore from ckpt
+            #         hooks=[stop_hook],
+            #         chief_only_hooks=[report_hook, summary_hook], # the hooks are only valid for chief session
+            #         save_checkpoint_secs=5000, # every 6 minutes save ckpt
+            #         save_summaries_steps=0, # do NOT save summary into checkpoint_dir
+            #         config=config) as sess:
+
+            with tf.Session(config=config) as sess:
+                sess.run(tf.local_variables_initializer())
+                sess.run(tf.global_variables_initializer())
 
                 self.sess = sess
                 self.cur_nimg = batchsz * self.tf_sess.run(global_step)
 
-                while not sess.should_stop():
+                while True:
                     # run data_in ops first and then run ops.train_op
 
                     spt_x, spt_y, qry_x, qry_y = self.train_db.get_batch(batchsz, use_episode=True)
 
-                    sess.run(ops['meta_op'], feed_dict={
+                    result = sess.run([ops['meta_op']] + ops['losses_qry'], feed_dict={
                         ops['train_spt_x']: spt_x,
                         ops['train_spt_y']: spt_y,
                         ops['train_qry_x']: qry_x,
                         ops['train_qry_y']: qry_y
                     })
 
-                    # MonitoredTrainingSession has an underlying session object: tf_session
-                    # current computed number of image
-                    self.cur_nimg = batchsz * self.tf_sess.run(global_step)
 
 
                     # Time to evaluate classification accuracy
-                    if self.cur_nimg % (report_kimg << 6) == 0:
-                        # return with float accuracy
-                        accuracy = self.eval_latent_accuracy(ops)
-                        # print('eval accuracy:', accuracy, self.cur_nimg)
-                        # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
-                        update_my_summary_op(latent_accuracy_op, accuracy)
+                    if self.cur_nimg % (report_kimg << 2) == 0:
+
+                        print(self.cur_nimg, result[1:])
+
+                        # # return with float accuracy
+                        # accuracy = self.eval_latent_accuracy(ops)
+                        # # print('eval accuracy:', accuracy, self.cur_nimg)
+                        # # self.tf_sess.run(latent_accuracy_op, feed_dict={some_float: accuracy})
+                        # update_my_summary_op(latent_accuracy_op, accuracy)
+
+
+
+                    # update processed image counter
+                    self.cur_nimg = batchsz * self.tf_sess.run(global_step)
 
 
     def eval_latent_accuracy(self, ops):
@@ -198,35 +209,58 @@ class FAUL:
 
         batchsz = FLAGS.batchsz
         update_num = FLAGS.update_num
-        correct = np.zeros(update_num+1)
-        totoal_counter = 0
+        accs = np.zeros(update_num+1)
+        total_counter = 0
+        total_iter = 0
 
         while True:
-            spt_x, spt_y, qry_x, qry_y = self.test_db.get_batch(batchsz, use_episode=True)
-            pretrain_op_ = self.tf_sess.run(ops['pretrain_op'],
-                                                    feed_dict={
-                                                        ops['test_spt_x']: spt_x,
-                                                        ops['test_spt_y']: spt_y,
-                                                        ops['test_qry_x']: qry_x,
-                                                        ops['test_qry_y']: qry_y
-                                                    })
-            qry_preds = self.tf_sess.run(ops['classify_preds'],
-                                                    feed_dict={
-                                                        ops['test_spt_x']: spt_x,
-                                                        ops['test_spt_y']: spt_y,
-                                                        ops['test_qry_x']: qry_x,
-                                                        ops['test_qry_y']: qry_y
-                                                    })
-            for i, qry_pred in enumerate(qry_preds):
-                correct[i] += (qry_pred == qry_y.argmax(1))
-            totoal_counter += batchsz
+            spt_x, spt_y, qry_x, qry_y = self.test_db.get_batch(batchsz=1, use_episode=True)
+            train_spt_x, train_spt_y, train_qry_x, train_qry_y = self.train_db.get_batch(batchsz, use_episode=True)
 
-            if totoal_counter > 1000:
+            result = self.tf_sess.run(ops['pretrain_op'],
+                                                    feed_dict={
+                                                        ops['test_spt_x']: spt_x[0],
+                                                        ops['test_spt_y']: spt_y[0],
+                                                        ops['test_qry_x']: qry_x[0],
+                                                        ops['test_qry_y']: qry_y[0]
+                                                        #
+                                                        # ops['train_spt_x']: train_spt_x,
+                                                        # ops['train_spt_y']: train_spt_y,
+                                                        # ops['train_qry_x']: train_qry_x,
+                                                        # ops['train_qry_y']: train_qry_y
+                                                    })
+            # for i in range(update_num+1):
+            #     accs[i] += result[i+1]
+
+            for step in range(update_num):
+                classify_ops = ops['classify_ops'][step]
+
+                for i in range(10):
+                    # train update_num+1 classifers for one step
+                    # classify_ops = [classify_train_op, classify_loss, classify_pred, classify_acc]
+                    _, classify_loss, classify_pred, classify_acc = self.tf_sess.run(classify_ops,
+                                                        feed_dict={
+                                                            ops['test_spt_x']: spt_x[0],
+                                                            ops['test_spt_y']: spt_y[0],
+                                                            ops['test_qry_x']: qry_x[0],
+                                                            ops['test_qry_y']: qry_y[0]
+                                                        })
+
+                # after 100 training steps, we sum step=0~5 accuracy
+                accs[step] += classify_acc
+
+
+            total_counter += batchsz
+            total_iter += 1
+
+            if total_counter > 10:
                 break
 
-        accuracy = correct / totoal_counter
-        tf.logging.info('Eval acc:', accuracy)
-        return accuracy
+        acc = accs / total_iter
+        print('Eval acc:', acc)
+
+        return acc[-1]
+
 
 
     def make_sample_grid_and_save(self, ops, batch_size=16, random=4, interpolation=16, height=16, save_to_disk=True):

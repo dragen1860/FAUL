@@ -353,7 +353,7 @@ class MetaAE(FAUL):
 
 
         # we will use these ops to get test process
-        encoder_ops, decoder_ops, ae_ops, classify_accs = [], [], [], []
+        encoder_ops, decoder_ops, ae_ops, classify_ops = [], [], [], []
 
         def record_test_ops(vars_k, k):
             """
@@ -372,23 +372,16 @@ class MetaAE(FAUL):
 
             # this op only optimize classifier, hence stop_gradient after encoder_op
             # classify_op is not a single op, including prediction and loss
-            classify_loss, _ = single_layer_classifier(tf.stop_gradient(encoder_op),
+
+            classify_loss, classify_pred = single_layer_classifier(tf.stop_gradient(encoder_op),
                                                                 test_qry_y, self.n_way,
                                                                 scope='classifier_%d'%k, reuse=False)
-            def train_mlp():
-                with tf.Session() as sess:
-                    op = tf.train.AdamOptimizer().minimize(classify_loss)
-                    for _ in range(100):
-                        sess.run(op)
-                    classify_pred = single_layer_classifier(tf.stop_gradient(encoder_op),
-                                                                test_qry_y, self.n_way,
-                                                                scope='classifier_%d'%k, reuse=True)
-                    classify_pred = sess.run(classify_pred)
-                return classify_pred
+            classify_train_op = tf.train.AdamOptimizer().minimize(classify_loss)
+            # print(test_qry_y, classify_pred)
+            _, classify_acc = tf.metrics.accuracy(test_qry_y, classify_pred)
 
-            classify_pred = tf.py_func(train_mlp, None, [tf.int32])
-            acc = tf.metrics.accuracy(test_qry_y, classify_pred)
-            classify_accs.append(acc)
+            classify_ops.append([classify_train_op, classify_loss, classify_pred, classify_acc])
+
             # record classification loss on latent
             # utils.HookReport.log_tensor(tf.reduce_mean(classify_loss), 'test_classify_h_loss_update_%d'%k)
 
@@ -425,13 +418,14 @@ class MetaAE(FAUL):
 
         ops = {
             'meta_op': meta_op if training else None,
+            'losses_qry' : self.losses_qry if training else None,
             'train_spt_x': train_spt_x if training else None,
             'train_spt_y': train_spt_y if training else None,
             'train_qry_x': train_qry_x if training else None,
             'train_qry_y': train_qry_y if training else None,
 
             'pretrain_op' : pretrain_op,
-            'classify_preds': classify_preds, # len=update_num+1, array of (op.output, op.loss)
+            'classify_ops': classify_ops,
             'encoder_ops' : encoder_ops, # len=update_num+1,
             'decoder_ops' : decoder_ops, # len=update_num+1,
             'ae_ops'      : ae_ops, # len=update_num+1
